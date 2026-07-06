@@ -1124,12 +1124,23 @@ def run_once():
 
     log_to_sheet(all_new)
 
-    if all_new:
-        companies = list(set(j['company'] for j in all_new))[:3]
-        extra = f" +{len(all_new)-3} more" if len(all_new) > 3 else ""
+    tier1_jobs = [j for j in all_new if tier(j["company"]) == 1]
+    tier2_jobs = [j for j in all_new if tier(j["company"]) == 2]
+
+    if tier1_jobs:
+        n = len(tier1_jobs)
         send_email(
-            all_new,
-            f"🚨 {len(all_new)} new intern posting{'s' if len(all_new)>1 else ''} — {', '.join(companies)}{extra}",
+            tier1_jobs,
+            f"🚨 TIER-1 ALERT: {n} new posting{'s' if n>1 else ''} "
+            f"— {', '.join(sorted(set(j['company'] for j in tier1_jobs)))}",
+        )
+
+    if tier2_jobs:
+        companies = list(set(j['company'] for j in tier2_jobs))[:3]
+        extra = f" +{len(tier2_jobs)-3} more" if len(tier2_jobs) > 3 else ""
+        send_email(
+            tier2_jobs,
+            f"📋 {len(tier2_jobs)} new intern posting{'s' if len(tier2_jobs)>1 else ''} — {', '.join(companies)}{extra}",
         )
 
     alerts = check_health_alerts(health)
