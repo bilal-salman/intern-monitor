@@ -951,4 +951,46 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if "--once" in sys.argv:
+        run_once()
+    else:
+        main()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SINGLE CYCLE MODE — used by GitHub Actions
+# Runs all sources once, emails everything found, saves state, exits.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_once():
+    log.info("internship_monitor — single cycle (GitHub Actions mode)")
+    ids, urls = load_seen()
+    log.info(f"loaded {len(ids)} seen IDs, {len(urls)} seen URLs")
+
+    all_new = []
+    all_new += poll_zshah101(ids, urls)
+    all_new += poll_github(ids, urls)
+    all_new += poll_greenhouse(ids, urls)
+    all_new += poll_lever(ids, urls)
+    all_new += poll_ashby(ids, urls)
+    all_new += poll_workday(ids, urls)
+    all_new += poll_google(ids, urls)
+    all_new += poll_microsoft(ids, urls)
+    all_new += poll_amazon(ids, urls)
+    all_new += poll_meta(ids, urls)
+    all_new += poll_apple(ids, urls)
+    all_new += poll_yc(ids, urls)
+    all_new += poll_linkedin(ids, urls)
+    log.info(f"─── {len(all_new)} new total ─────────────────────")
+
+    if all_new:
+        companies = list(set(j['company'] for j in all_new))[:3]
+        extra = f" +{len(all_new)-3} more" if len(all_new) > 3 else ""
+        send_email(
+            all_new,
+            f"🚨 {len(all_new)} new intern posting{'s' if len(all_new)>1 else ''} — {', '.join(companies)}{extra}",
+        )
+
+    save_seen(ids, urls)
+    log.info("done")
