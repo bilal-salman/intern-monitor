@@ -950,17 +950,8 @@ def main():
         time.sleep(POLL_INTERVAL)
 
 
-if __name__ == "__main__":
-    import sys
-    if "--once" in sys.argv:
-        run_once()
-    else:
-        main()
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # SINGLE CYCLE MODE — used by GitHub Actions
-# Runs all sources once, emails everything found, saves state, exits.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_once():
@@ -994,3 +985,11 @@ def run_once():
 
     save_seen(ids, urls)
     log.info("done")
+
+
+if __name__ == "__main__":
+    import sys
+    if "--once" in sys.argv:
+        run_once()
+    else:
+        main()
