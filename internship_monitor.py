@@ -18,8 +18,7 @@ Sources polled every 5 min:
   10. Amazon Jobs API             — Amazon's public job search API
   11. Meta Careers scraper        — metacareers.com HTML scrape
   12. Apple Jobs scraper          — jobs.apple.com JSON API
-  13. LinkedIn guest search       — unauthenticated job search, last 24h, US
-  14. YC Work at a Startup        — workatastartup.com API
+  13. YC Work at a Startup        — workatastartup.com API
 
 Email strategy:
   • Tier-1 companies  →  immediate alert (within 1 poll cycle = ~5 min)
@@ -58,42 +57,18 @@ DIGEST_INTERVAL = 1800 # seconds between digest emails for non-tier-1 jobs (30 m
 SEEN_FILE       = "seen_jobs.json"
 
 # ── Tier-1: immediate email the second one of these drops ─────────────────────
+# Trimmed to: FAANG + AI leaders (default aspirational targets) + your actual
+# active referral network. Cut: quant trading, aerospace/defense, and the
+# generic enterprise-software long tail (Okta, Datadog, HubSpot, etc.) that
+# wasn't tied to a real contact. Add anything back with one word.
 TIER1 = {
     # FAANG / MANGO
-    "google", "meta", "apple", "amazon", "netflix", "microsoft",
-    "nvidia", "openai", "anthropic",
-    # Top tier tech
-    "stripe", "airbnb", "coinbase", "databricks", "palantir",
-    "figma", "atlassian", "snowflake", "uber", "lyft", "doordash",
-    "canva", "notion", "ramp", "linear", "vercel", "discord",
-    "plaid", "chime", "affirm", "robinhood", "brex",
-    # Quant / finance tech
-    "jane street", "citadel", "two sigma", "de shaw", "jump trading",
-    "hudson river", "imc", "akuna", "optiver",
-    # Hot AI companies
-    "perplexity", "cohere", "mistral", "character", "inflection",
-    "scale", "anyscale", "together ai",
-    # Aerospace / defense tech
-    "spacex", "anduril", "shield ai", "blue origin",
-    # Established tech
-    "salesforce", "adobe", "oracle", "intel", "amd", "qualcomm",
-    "cisco", "ibm", "intuit", "servicenow", "workday", "sap",
-    "dropbox", "box", "zendesk", "okta", "splunk",
-    "elastic", "mongodb", "confluent", "cloudflare", "datadog",
-    "palo alto", "crowdstrike", "sentinelone", "hashicorp",
-    "twilio", "asana", "hubspot", "zoom", "pinterest", "reddit",
-    "shopify", "instacart", "rippling", "gusto", "lattice",
-    "benchling", "retool", "airtable",
-    # Fintech
-    "paypal", "square", "block", "visa", "mastercard", "klarna",
-    "nubank", "revolut", "wise", "mercury",
-    # Finance / banking tech
-    "goldman sachs", "jpmorgan", "morgan stanley",
-    "bloomberg", "capital one", "american express",
-    # Autonomous / hardware
-    "waymo", "cruise", "aurora", "rivian", "zoox",
-    # Cloud / infra
-    "grafana", "supabase", "planetscale", "pulumi", "new relic",
+    "google", "meta", "apple", "amazon", "netflix", "microsoft", "nvidia",
+    # AI leaders
+    "openai", "anthropic",
+    # Your active referral network
+    "coinbase", "snowflake", "shopify", "bloomberg", "boeing", "schwab",
+    "capital one", "disney", "uber", "stripe", "pinterest", "sap", "marvell",
 }
 
 # ── Tier-2: everything not in TIER1 goes to 30-min digest ─────────────────────
@@ -203,8 +178,11 @@ WORKDAY_CONFIGS = [
     ("GE Appliances",       "haier",             "3",    "GE_Appliances"),
     ("Blue Origin",         "blueorigin",        "5",    "BlueOrigin"),
     ("Motorola",            "motorolasolutions", "5",    "Careers"),
-    ("Adobe",               "adobe",             "5",    "external_wday"),
     ("TD Bank",             "td",                "3",    "TD_Bank_Careers"),
+    # Added — confirmed live Workday tenants for two of your referral-network
+    # companies that were in TIER1 but had zero ATS coverage:
+    ("Disney",              "disney",            "5",    "disneycareer"),
+    ("Marvell",             "marvell",           "1",    "MarvellCareers"),
 ]
 
 
@@ -242,8 +220,105 @@ def save_seen(ids: set, urls: set):
         json.dump({"ids": sorted(ids), "urls": sorted(urls)}, f)
 
 
+def load_state() -> tuple[set, set, dict]:
+    """Single read of SEEN_FILE returning ids, urls, and health tracking."""
+    if Path(SEEN_FILE).exists():
+        with open(SEEN_FILE) as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return set(data), set(), {}
+            return (set(data.get("ids", [])), set(data.get("urls", [])),
+                    data.get("health", {}))
+    return set(), set(), {}
+
+
+def save_state(ids: set, urls: set, health: dict):
+    with open(SEEN_FILE, "w") as f:
+        json.dump({"ids": sorted(ids), "urls": sorted(urls), "health": health}, f)
+
+
 def make_id(source: str, uid: str) -> str:
     return hashlib.sha1(f"{source}::{uid}".lower().encode()).hexdigest()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SOURCE HEALTH TRACKING
+# Persisted alongside seen_jobs.json so it survives across GitHub Actions runs
+# (each run is a fresh container — nothing survives except what's committed).
+#
+# Per source we track:
+#   consec_errors  — polls in a row that raised an exception (network/API break)
+#   last_nonzero   — unix ts of the last time this source returned >0 jobs
+#   last_alerted   — unix ts we last sent a health warning for this source,
+#                    so we alert once per issue instead of every 30 min
+#
+# Two alert conditions:
+#   ERRORING — 3+ consecutive exceptions → something is actively broken
+#   SILENT   — 7+ days since last nonzero result → probably broken, just not
+#              throwing (e.g. README table format changed, HTML scrape target
+#              moved) — the exact failure mode flagged for GitHub/Meta
+# ══════════════════════════════════════════════════════════════════════════════
+
+ERROR_STREAK_THRESHOLD = 3
+SILENT_DAYS_THRESHOLD  = 7
+ALERT_COOLDOWN_SECONDS = 86400  # re-alert on the same issue at most once/day
+
+ALL_SOURCES = [
+    "zshah101", "github", "greenhouse", "lever", "ashby", "workday",
+    "google", "microsoft", "amazon", "meta", "apple", "yc",
+]
+
+
+def run_source(name: str, fn, ids, urls, health: dict) -> list:
+    """Wraps a poll_* call, updates health tracking, never lets one source's
+    failure take down the whole cycle."""
+    rec = health.setdefault(name, {
+        "consec_errors": 0, "last_nonzero": time.time(), "last_alerted": 0,
+    })
+    try:
+        results = fn(ids, urls)
+        rec["consec_errors"] = 0
+        if results:
+            rec["last_nonzero"] = time.time()
+        return results
+    except Exception as e:
+        rec["consec_errors"] += 1
+        log.error(f"{name}: unhandled error ({e}) — consec_errors={rec['consec_errors']}")
+        return []
+
+
+def check_health_alerts(health: dict) -> list:
+    """Returns a list of human-readable alert strings for sources that look
+    broken, respecting the once-per-day cooldown per source."""
+    now = time.time()
+    alerts = []
+    for name in ALL_SOURCES:
+        rec = health.get(name)
+        if not rec:
+            continue
+        if now - rec.get("last_alerted", 0) < ALERT_COOLDOWN_SECONDS:
+            continue
+
+        fired = False
+        if rec.get("consec_errors", 0) >= ERROR_STREAK_THRESHOLD:
+            alerts.append(
+                f"⚠️ {name}: {rec['consec_errors']} consecutive failed polls — "
+                f"likely broken (API/endpoint change)."
+            )
+            fired = True
+        else:
+            days_silent = (now - rec.get("last_nonzero", now)) / 86400
+            if days_silent >= SILENT_DAYS_THRESHOLD:
+                alerts.append(
+                    f"⚠️ {name}: 0 results for {days_silent:.1f} days — "
+                    f"probably broken silently (parser/format change), not just quiet."
+                )
+                fired = True
+
+        if fired:
+            rec["last_alerted"] = now
+
+    return alerts
 
 
 def is_new(ids: set, urls: set, source: str, uid: str, url: str) -> bool:
@@ -262,7 +337,81 @@ def is_new(ids: set, urls: set, source: str, uid: str, url: str) -> bool:
 # FILTERING
 # ══════════════════════════════════════════════════════════════════════════════
 
-def is_relevant(company: str, role: str) -> bool:
+# ── Location filter ────────────────────────────────────────────────────────────
+# Feeds report location as free text with zero consistency (city only, "Remote",
+# "London, UK", "USA", state abbrev, etc). There's no reliable structured country
+# field across all 13 sources, so this is a keyword heuristic, not a guarantee.
+#
+# Policy: block on any clear NON-US signal. If we can't tell (blank, ambiguous
+# "Remote" with no country, unrecognized city), we let it through rather than
+# silently drop it — false negatives (US job dropped) are worse than false
+# positives (you get an email you delete in 2 seconds).
+
+NON_US_KEYWORDS = {
+    # explicit country / region names
+    "canada", "united kingdom", "uk", "england", "scotland", "wales",
+    "ireland", "germany", "france", "spain", "italy", "netherlands",
+    "poland", "sweden", "switzerland", "austria", "belgium", "portugal",
+    "india", "china", "japan", "singapore", "hong kong", "taiwan",
+    "south korea", "korea", "australia", "new zealand",
+    "mexico", "brazil", "argentina", "chile", "colombia",
+    "israel", "uae", "united arab emirates", "dubai",
+    "philippines", "vietnam", "indonesia", "malaysia", "thailand",
+    "romania", "czech", "hungary", "greece", "denmark", "norway", "finland",
+    "south africa", "nigeria", "egypt", "pakistan", "bangladesh",
+    "eu remote", "emea", "apac", "latam",
+    # common non-US cities that show up without a country label
+    "london", "toronto", "vancouver", "montreal", "dublin", "berlin",
+    "munich", "paris", "amsterdam", "warsaw", "madrid", "barcelona",
+    "milan", "zurich", "tel aviv", "bangalore", "bengaluru", "hyderabad",
+    "mumbai", "delhi", "pune", "shanghai", "beijing", "shenzhen",
+    "tokyo", "seoul", "sydney", "melbourne", "sao paulo", "mexico city",
+}
+
+US_KEYWORDS = {
+    "united states", "usa", "u.s.", "us remote", "remote - us", "remote, us",
+    "remote (us)", "remote-usa", "remote usa",
+    # states (name + common abbreviations, filtered for ones unlikely to
+    # collide with the non-US city/country strings above)
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+    "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
+    "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
+    "maine", "maryland", "massachusetts", "michigan", "minnesota",
+    "mississippi", "missouri", "montana", "nebraska", "nevada",
+    "new hampshire", "new jersey", "new mexico", "new york", "north carolina",
+    "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania",
+    "rhode island", "south carolina", "south dakota", "tennessee", "texas",
+    "utah", "vermont", "virginia", "washington", "west virginia",
+    "wisconsin", "wyoming",
+    # major US cities that commonly appear without "USA" appended
+    "san francisco", "new york city", "nyc", "seattle", "austin", "chicago",
+    "boston", "los angeles", "san jose", "sunnyvale", "mountain view",
+    "menlo park", "palo alto", "redmond", "bellevue", "atlanta", "denver",
+    "san diego", "portland", "miami", "dallas", "houston", "raleigh",
+    "durham", "pittsburgh", "washington dc", "arlington", "cambridge",
+}
+
+
+def is_us_location(loc: str) -> bool:
+    lo = loc.lower().strip()
+    if not lo:
+        return True  # unknown — let it through, don't silently drop
+
+    if any(k in lo for k in US_KEYWORDS):
+        return True
+
+    if any(k in lo for k in NON_US_KEYWORDS):
+        return False
+
+    # "Remote" with no country/city qualifier at all — ambiguous, let through
+    if "remote" in lo:
+        return True
+
+    # Unrecognized location string (couldn't match either list) — let through
+    return True
+
+
+def is_relevant(company: str, role: str, loc: str = "") -> bool:
     co = company.lower()
     ro = role.lower()
 
@@ -280,6 +429,10 @@ def is_relevant(company: str, role: str) -> bool:
 
     # Kill frontend-only, fullstack, data, ML, hardware, mobile
     if any(k in ro for k in EXCLUDE_KEYWORDS):
+        return False
+
+    # Must be a US location (or unknown/ambiguous — see is_us_location)
+    if not is_us_location(loc):
         return False
 
     return True
@@ -373,6 +526,31 @@ def send_email(jobs: list, subject: str):
         log.error(f"email failed: {e}")
 
 
+def send_health_alert(alerts: list):
+    """One plain-text email listing any sources that look broken. Only fires
+    when check_health_alerts() has something to say, and each source is
+    capped at one alert per day (see ALERT_COOLDOWN_SECONDS)."""
+    if not alerts:
+        return
+    body = (
+        "Source health check flagged the following:\n\n"
+        + "\n".join(alerts)
+        + "\n\n— internship_monitor"
+    )
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"🔧 Monitor health warning — {len(alerts)} source(s) may be broken"
+    msg["From"]    = GMAIL_USER
+    msg["To"]      = NOTIFY_EMAIL
+    msg.attach(MIMEText(body, "plain"))
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+            s.login(GMAIL_USER, GMAIL_APP_PW)
+            s.send_message(msg)
+        log.info(f"✉  sent health alert: {len(alerts)} issue(s)")
+    except Exception as e:
+        log.error(f"health alert email failed: {e}")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -412,7 +590,7 @@ def poll_zshah101(ids, urls) -> list:
             role    = j.get("role", j.get("title", ""))
             url     = j.get("url", j.get("apply", ""))
             loc     = j.get("location", "")
-            if is_relevant(company, role) and is_new(ids, urls, "zshah101", url, url):
+            if is_relevant(company, role, loc) and is_new(ids, urls, "zshah101", url, url):
                 new.append(job_dict(company, role, loc, url, "zshah101"))
         log.info(f"zshah101:    {len(new):3d} new")
     except Exception as e:
@@ -471,7 +649,7 @@ def _parse_readme(r, ids, urls, key) -> list:
             if not apply_url:
                 continue
             loc = cells[2] if len(cells) > 2 else ""
-            if is_relevant(company, role) and is_new(ids, urls, key, apply_url, apply_url):
+            if is_relevant(company, role, loc) and is_new(ids, urls, key, apply_url, apply_url):
                 new.append(job_dict(company, role, loc, apply_url, f"github/{r['owner']}"))
     except Exception as e:
         log.warning(f"readme parse ({key}): {e}")
@@ -495,7 +673,7 @@ def poll_greenhouse(ids, urls) -> list:
                 url   = j.get("absolute_url", "")
                 loc   = j.get("location", {}).get("name", "")
                 jid   = str(j.get("id", url))
-                if is_relevant(slug, role) and is_new(ids, urls, "greenhouse", jid, url):
+                if is_relevant(slug, role, loc) and is_new(ids, urls, "greenhouse", jid, url):
                     new.append(job_dict(slug.replace("-"," ").title(), role, loc, url, "Greenhouse"))
             time.sleep(0.35)
         except Exception as e:
@@ -523,7 +701,7 @@ def poll_lever(ids, urls) -> list:
                 url  = j.get("hostedUrl", "")
                 loc  = j.get("categories", {}).get("location", "")
                 jid  = j.get("id", url)
-                if is_relevant(slug, role) and is_new(ids, urls, "lever", jid, url):
+                if is_relevant(slug, role, loc) and is_new(ids, urls, "lever", jid, url):
                     new.append(job_dict(slug.title(), role, loc, url, "Lever"))
             time.sleep(0.35)
         except Exception as e:
@@ -549,7 +727,7 @@ def poll_ashby(ids, urls) -> list:
                 url  = j.get("jobPostingUrl", "")
                 loc  = j.get("locationName", "")
                 jid  = j.get("id", url)
-                if is_relevant(slug, role) and is_new(ids, urls, "ashby", jid, url):
+                if is_relevant(slug, role, loc) and is_new(ids, urls, "ashby", jid, url):
                     new.append(job_dict(slug.title(), role, loc, url, "Ashby"))
             time.sleep(0.35)
         except Exception as e:
@@ -590,7 +768,7 @@ def poll_workday(ids, urls) -> list:
                 url   = f"{base_url}{path}" if path else base_url
                 loc   = j.get("locationsText", "")
                 jid   = path or role
-                if is_relevant(display, role) and is_new(ids, urls, f"workday/{subdomain}", jid, url):
+                if is_relevant(display, role, loc) and is_new(ids, urls, f"workday/{subdomain}", jid, url):
                     new.append(job_dict(display, role, loc, url, "Workday"))
             time.sleep(0.5)
         except Exception as e:
@@ -621,7 +799,7 @@ def poll_google(ids, urls) -> list:
             loc  = j.get("locations", [{}])[0].get("display", "") if j.get("locations") else ""
             jid  = str(j.get("id", ""))
             url  = f"https://careers.google.com/jobs/results/{jid}"
-            if is_relevant("google", role) and is_new(ids, urls, "google", jid, url):
+            if is_relevant("google", role, loc) and is_new(ids, urls, "google", jid, url):
                 new.append(job_dict("Google", role, loc, url, "Google Careers"))
         log.info(f"google:      {len(new):3d} new")
     except Exception as e:
@@ -653,7 +831,7 @@ def poll_microsoft(ids, urls) -> list:
             loc  = j.get("primaryWorkLocation", "")
             jid  = str(j.get("jobId", ""))
             url  = f"https://jobs.careers.microsoft.com/global/en/job/{jid}"
-            if is_relevant("microsoft", role) and is_new(ids, urls, "microsoft", jid, url):
+            if is_relevant("microsoft", role, loc) and is_new(ids, urls, "microsoft", jid, url):
                 new.append(job_dict("Microsoft", role, loc, url, "Microsoft Careers"))
         log.info(f"microsoft:   {len(new):3d} new")
     except Exception as e:
@@ -685,7 +863,7 @@ def poll_amazon(ids, urls) -> list:
                 jid  = str(j.get("id", ""))
                 path = j.get("job_path", "")
                 url  = f"https://www.amazon.jobs{path}" if path else "https://www.amazon.jobs"
-                if is_relevant("amazon", role) and is_new(ids, urls, "amazon", jid, url):
+                if is_relevant("amazon", role, loc) and is_new(ids, urls, "amazon", jid, url):
                     new.append(job_dict("Amazon", role, loc, url, "Amazon Jobs"))
             time.sleep(1)
         except Exception as e:
@@ -718,7 +896,7 @@ def poll_meta(ids, urls) -> list:
             loc  = j.get("locations", [""])[0] if j.get("locations") else ""
             jid  = str(j.get("id", ""))
             url  = f"https://www.metacareers.com/jobs/{jid}"
-            if is_relevant("meta", role) and is_new(ids, urls, "meta", jid, url):
+            if is_relevant("meta", role, loc) and is_new(ids, urls, "meta", jid, url):
                 new.append(job_dict("Meta", role, loc, url, "Meta Careers"))
         log.info(f"meta:        {len(new):3d} new")
     except Exception as e:
@@ -754,7 +932,7 @@ def poll_apple(ids, urls) -> list:
             loc  = j.get("locations", [{}])[0].get("name", "") if j.get("locations") else ""
             jid  = str(j.get("positionId", ""))
             url  = f"https://jobs.apple.com/en-us/details/{jid}"
-            if is_relevant("apple", role) and is_new(ids, urls, "apple", jid, url):
+            if is_relevant("apple", role, loc) and is_new(ids, urls, "apple", jid, url):
                 new.append(job_dict("Apple", role, loc, url, "Apple Jobs"))
         log.info(f"apple:       {len(new):3d} new")
     except Exception as e:
@@ -787,88 +965,11 @@ def poll_yc(ids, urls) -> list:
                 url  = f"https://www.workatastartup.com/jobs/{j.get('id','')}"
                 loc  = j.get("remote_ok") and "Remote" or co.get("locations", [""])[0]
                 jid  = str(j.get("id", ""))
-                if is_relevant(co_name, role) and is_new(ids, urls, "yc", jid, url):
+                if is_relevant(co_name, role, loc) and is_new(ids, urls, "yc", jid, url):
                     new.append(job_dict(co_name, role, loc, url, "YC/WaaS"))
         log.info(f"yc/waas:     {len(new):3d} new")
     except Exception as e:
         log.warning(f"yc waas: {e}")
-    return new
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SOURCE 13 — LinkedIn guest job search (no auth, last 24h, US)
-#
-# ⚠  Fragile: LinkedIn changes HTML structure periodically.
-#    If it breaks: check LI_SEARCHES list, adjust parser, or temporarily disable.
-#    For recruiter *posts* (feed content): needs auth — separate, harder build.
-# ══════════════════════════════════════════════════════════════════════════════
-
-LI_SEARCHES = [
-    "software+engineer+intern",
-    "software+developer+intern",
-    "data+science+intern",
-    "machine+learning+intern",
-    "backend+engineer+intern",
-]
-
-
-class _LIParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.jobs = []
-        self._cur = {}
-        self._in_title = self._in_company = self._in_loc = False
-
-    def handle_starttag(self, tag, attrs):
-        a = dict(attrs)
-        cls = a.get("class", "")
-        if tag == "a" and "base-card__full-link" in cls:
-            self._cur["url"] = a.get("href", "").split("?")[0]
-        if tag == "span":
-            if "screen-reader-text" in cls:     self._in_title = True
-            elif "base-search-card__subtitle" in cls: self._in_company = True
-            elif "job-search-card__location" in cls:  self._in_loc = True
-
-    def handle_data(self, data):
-        data = data.strip()
-        if not data: return
-        if self._in_title:
-            self._cur["role"] = data;    self._in_title = False
-        elif self._in_company:
-            self._cur["company"] = data; self._in_company = False
-        elif self._in_loc:
-            self._cur["location"] = data; self._in_loc = False
-            if self._cur.get("url") and self._cur.get("role"):
-                self.jobs.append(dict(self._cur))
-            self._cur = {}
-
-
-def poll_linkedin(ids, urls) -> list:
-    new = []
-    for kw in LI_SEARCHES:
-        try:
-            resp = requests.get(
-                "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
-                f"?keywords={kw}&location=United+States"
-                "&f_TPR=r86400&f_E=1&start=0",
-                headers=BROWSER_HEADERS, timeout=15,
-            )
-            if resp.status_code != 200:
-                log.warning(f"linkedin {kw}: HTTP {resp.status_code}")
-                continue
-            parser = _LIParser()
-            parser.feed(resp.text)
-            for j in parser.jobs:
-                company = j.get("company", "")
-                role    = j.get("role", "")
-                url     = j.get("url", "")
-                loc     = j.get("location", "")
-                if is_relevant(company, role) and is_new(ids, urls, "linkedin", url, url):
-                    new.append(job_dict(company, role, loc, url, "LinkedIn"))
-            time.sleep(2.5)  # LinkedIn rate-limits hard
-        except Exception as e:
-            log.warning(f"linkedin ({kw}): {e}")
-    log.info(f"linkedin:    {len(new):3d} new")
     return new
 
 
@@ -899,7 +1000,7 @@ def dispatch(all_new: list, digest_buffer: list) -> list:
 
 def main():
     log.info("internship_monitor starting")
-    ids, urls = load_seen()
+    ids, urls, health = load_state()
     log.info(f"loaded {len(ids)} seen IDs, {len(urls)} seen URLs")
     log.info(f"targeting {len(ALL_TARGETS)} companies · polling every {POLL_INTERVAL}s")
     log.info(f"tier-1 ({len(TIER1)}): immediate alert")
@@ -912,23 +1013,27 @@ def main():
         try:
             log.info("─── poll cycle ─────────────────────────────")
             all_new = []
-            all_new += poll_zshah101(ids, urls)
-            all_new += poll_github(ids, urls)
-            all_new += poll_greenhouse(ids, urls)
-            all_new += poll_lever(ids, urls)
-            all_new += poll_ashby(ids, urls)
-            all_new += poll_workday(ids, urls)
-            all_new += poll_google(ids, urls)
-            all_new += poll_microsoft(ids, urls)
-            all_new += poll_amazon(ids, urls)
-            all_new += poll_meta(ids, urls)
-            all_new += poll_apple(ids, urls)
-            all_new += poll_yc(ids, urls)
-            all_new += poll_linkedin(ids, urls)
+            all_new += run_source("zshah101",   poll_zshah101,   ids, urls, health)
+            all_new += run_source("github",      poll_github,     ids, urls, health)
+            all_new += run_source("greenhouse",  poll_greenhouse, ids, urls, health)
+            all_new += run_source("lever",       poll_lever,      ids, urls, health)
+            all_new += run_source("ashby",       poll_ashby,      ids, urls, health)
+            all_new += run_source("workday",     poll_workday,    ids, urls, health)
+            all_new += run_source("google",      poll_google,     ids, urls, health)
+            all_new += run_source("microsoft",   poll_microsoft,  ids, urls, health)
+            all_new += run_source("amazon",      poll_amazon,     ids, urls, health)
+            all_new += run_source("meta",        poll_meta,       ids, urls, health)
+            all_new += run_source("apple",       poll_apple,      ids, urls, health)
+            all_new += run_source("yc",          poll_yc,         ids, urls, health)
             log.info(f"─── {len(all_new)} new total ─────────────────────")
 
             digest_buffer = dispatch(all_new, digest_buffer)
-            save_seen(ids, urls)
+
+            alerts = check_health_alerts(health)
+            if alerts:
+                send_health_alert(alerts)
+
+            save_state(ids, urls, health)
 
             # Send hourly digest for tier-2
             if time.time() - last_digest >= DIGEST_INTERVAL and digest_buffer:
@@ -942,7 +1047,7 @@ def main():
 
         except KeyboardInterrupt:
             log.info("stopped — saving state")
-            save_seen(ids, urls)
+            save_state(ids, urls, health)
             break
         except Exception as e:
             log.error(f"main loop error: {e}")
@@ -956,23 +1061,22 @@ def main():
 
 def run_once():
     log.info("internship_monitor — single cycle (GitHub Actions mode)")
-    ids, urls = load_seen()
+    ids, urls, health = load_state()
     log.info(f"loaded {len(ids)} seen IDs, {len(urls)} seen URLs")
 
     all_new = []
-    all_new += poll_zshah101(ids, urls)
-    all_new += poll_github(ids, urls)
-    all_new += poll_greenhouse(ids, urls)
-    all_new += poll_lever(ids, urls)
-    all_new += poll_ashby(ids, urls)
-    all_new += poll_workday(ids, urls)
-    all_new += poll_google(ids, urls)
-    all_new += poll_microsoft(ids, urls)
-    all_new += poll_amazon(ids, urls)
-    all_new += poll_meta(ids, urls)
-    all_new += poll_apple(ids, urls)
-    all_new += poll_yc(ids, urls)
-    all_new += poll_linkedin(ids, urls)
+    all_new += run_source("zshah101",   poll_zshah101,   ids, urls, health)
+    all_new += run_source("github",      poll_github,     ids, urls, health)
+    all_new += run_source("greenhouse",  poll_greenhouse, ids, urls, health)
+    all_new += run_source("lever",       poll_lever,      ids, urls, health)
+    all_new += run_source("ashby",       poll_ashby,      ids, urls, health)
+    all_new += run_source("workday",     poll_workday,    ids, urls, health)
+    all_new += run_source("google",      poll_google,     ids, urls, health)
+    all_new += run_source("microsoft",   poll_microsoft,  ids, urls, health)
+    all_new += run_source("amazon",      poll_amazon,     ids, urls, health)
+    all_new += run_source("meta",        poll_meta,       ids, urls, health)
+    all_new += run_source("apple",       poll_apple,      ids, urls, health)
+    all_new += run_source("yc",          poll_yc,         ids, urls, health)
     log.info(f"─── {len(all_new)} new total ─────────────────────")
 
     if all_new:
@@ -983,7 +1087,11 @@ def run_once():
             f"🚨 {len(all_new)} new intern posting{'s' if len(all_new)>1 else ''} — {', '.join(companies)}{extra}",
         )
 
-    save_seen(ids, urls)
+    alerts = check_health_alerts(health)
+    if alerts:
+        send_health_alert(alerts)
+
+    save_state(ids, urls, health)
     log.info("done")
 
 

@@ -2,8 +2,12 @@ name: Internship Monitor
 
 on:
   schedule:
-    - cron: '*/30 * * * *'   # every 30 minutes
+    - cron: '2,12,22,32,42,52 * * * *'   # every 10 min, offset from :00 to dodge peak-load delays
   workflow_dispatch:           # lets you trigger it manually from GitHub too
+
+concurrency:
+  group: internship-monitor
+  cancel-in-progress: false   # queue overlapping runs instead of racing on git push
 
 jobs:
   monitor:
@@ -30,10 +34,15 @@ jobs:
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
         run: python internship_monitor.py --once
 
-      - name: Save seen_jobs.json back to repo
+      - name: Heartbeat (prevents 60-day inactivity auto-disable)
+        run: |
+          echo "last run: $(date -u)" > last_run.txt
+
+      - name: Save seen_jobs.json + heartbeat back to repo
         run: |
           git config user.email "actions@github.com"
           git config user.name  "GitHub Actions"
-          git add seen_jobs.json
-          git diff --staged --quiet || git commit -m "update seen jobs [skip ci]"
+          git pull --rebase --autostash
+          git add seen_jobs.json last_run.txt
+          git diff --staged --quiet || git commit -m "update seen jobs + heartbeat [skip ci]"
           git push
