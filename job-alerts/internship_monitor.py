@@ -52,6 +52,12 @@ GMAIL_APP_PW = os.environ.get("GMAIL_APP_PW", "xxxx xxxx xxxx xxxx")
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "your_gmail@gmail.com")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
+# Optional — logs every new match to your Google Sheet tracker via an Apps
+# Script webhook. If either is unset, this feature silently no-ops; nothing
+# else in the script depends on it.
+SHEETS_WEBHOOK_URL    = os.environ.get("SHEETS_WEBHOOK_URL", "")
+SHEETS_WEBHOOK_SECRET = os.environ.get("SHEETS_WEBHOOK_SECRET", "")
+
 POLL_INTERVAL   = 300  # seconds between full cycles — 5 min is the sweet spot
 DIGEST_INTERVAL = 1800 # seconds between digest emails for non-tier-1 jobs (30 min)
 SEEN_FILE       = "seen_jobs.json"
@@ -552,6 +558,41 @@ def send_health_alert(alerts: list):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# GOOGLE SHEET TRACKER LOGGING (optional)
+# Appends every new match to Bilal's existing "SWE Internship Tracker" sheet
+# via a tiny Apps Script webhook (see companion .gs snippet). Silently no-ops
+# if SHEETS_WEBHOOK_URL isn't set, so this never breaks anything for anyone
+# who hasn't configured it. Only ever appends new rows — never edits,
+# reorders, or touches any existing row, column, or dropdown.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def log_to_sheet(jobs: list):
+    if not jobs or not SHEETS_WEBHOOK_URL:
+        return
+    logged = 0
+    for j in jobs:
+        try:
+            resp = requests.post(
+                SHEETS_WEBHOOK_URL,
+                json={
+                    "secret":  SHEETS_WEBHOOK_SECRET,
+                    "company": j["company"],
+                    "role":    j["role"],
+                    "status":  "APPLY NOW",
+                    "link":    j["url"],
+                },
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                logged += 1
+            else:
+                log.warning(f"sheet log failed ({j['company']}): HTTP {resp.status_code}")
+        except Exception as e:
+            log.warning(f"sheet log error ({j['company']}): {e}")
+    log.info(f"sheet:       logged {logged}/{len(jobs)} row(s)")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1027,6 +1068,8 @@ def main():
             all_new += run_source("yc",          poll_yc,         ids, urls, health)
             log.info(f"─── {len(all_new)} new total ─────────────────────")
 
+            log_to_sheet(all_new)
+
             digest_buffer = dispatch(all_new, digest_buffer)
 
             alerts = check_health_alerts(health)
@@ -1078,6 +1121,8 @@ def run_once():
     all_new += run_source("apple",       poll_apple,      ids, urls, health)
     all_new += run_source("yc",          poll_yc,         ids, urls, health)
     log.info(f"─── {len(all_new)} new total ─────────────────────")
+
+    log_to_sheet(all_new)
 
     if all_new:
         companies = list(set(j['company'] for j in all_new))[:3]

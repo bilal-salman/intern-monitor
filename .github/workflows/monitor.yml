@@ -30,9 +30,11 @@ jobs:
       - name: Run monitor (single cycle)
         working-directory: job-alerts
         env:
-          GMAIL_USER:   ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PW: ${{ secrets.GMAIL_APP_PW }}
-          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          GMAIL_USER:            ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PW:          ${{ secrets.GMAIL_APP_PW }}
+          NOTIFY_EMAIL:          ${{ secrets.NOTIFY_EMAIL }}
+          SHEETS_WEBHOOK_URL:    ${{ secrets.SHEETS_WEBHOOK_URL }}
+          SHEETS_WEBHOOK_SECRET: ${{ secrets.SHEETS_WEBHOOK_SECRET }}
         run: python internship_monitor.py --once
 
       - name: Heartbeat (prevents 60-day inactivity auto-disable)
