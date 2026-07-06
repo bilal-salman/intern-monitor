@@ -28,6 +28,7 @@ jobs:
         run: pip install requests
 
       - name: Run monitor (single cycle)
+        working-directory: job-alerts
         env:
           GMAIL_USER:   ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PW: ${{ secrets.GMAIL_APP_PW }}
@@ -35,6 +36,7 @@ jobs:
         run: python internship_monitor.py --once
 
       - name: Heartbeat (prevents 60-day inactivity auto-disable)
+        working-directory: job-alerts
         run: |
           echo "last run: $(date -u)" > last_run.txt
 
@@ -43,6 +45,6 @@ jobs:
           git config user.email "actions@github.com"
           git config user.name  "GitHub Actions"
           git pull --rebase --autostash
-          git add seen_jobs.json last_run.txt
+          git add job-alerts/seen_jobs.json job-alerts/last_run.txt
           git diff --staged --quiet || git commit -m "update seen jobs + heartbeat [skip ci]"
           git push
