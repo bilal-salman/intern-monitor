@@ -14,11 +14,10 @@ Sources polled every 5 min:
   7.  Workday API                 — direct ATS: Nvidia, Salesforce, Adobe, Shopify,
                                     Atlassian, Netflix, Boeing, Boeing, Capital One, +more
   8.  Google Careers API          — Google's own public job search API
-  9.  Microsoft Careers API       — Microsoft's public job search API
-  10. Amazon Jobs API             — Amazon's public job search API
-  11. Meta Careers scraper        — metacareers.com HTML scrape
-  12. Apple Jobs scraper          — jobs.apple.com JSON API
-  13. YC Work at a Startup        — workatastartup.com API
+  9.  Amazon Jobs API             — Amazon's public job search API
+  10. Meta Careers scraper        — metacareers.com HTML scrape
+  11. Apple Jobs scraper          — jobs.apple.com JSON API
+  12. YC Work at a Startup        — workatastartup.com API
 
 Email strategy:
   • Tier-1 companies  →  immediate alert (within 1 poll cycle = ~5 min)
@@ -90,6 +89,7 @@ INTERN_KEYWORDS = {
 # Role must contain at least one of these to pass
 SWE_INCLUDE_KEYWORDS = {
     "software engineer", "software developer", "swe",
+    "software development engineer", "sde", "development engineer",
     "backend", "back-end", "back end",
     "platform engineer", "platform developer",
     "infrastructure engineer", "infra engineer",
@@ -98,6 +98,7 @@ SWE_INCLUDE_KEYWORDS = {
     "site reliability", "sre",
     "devops engineer",
     "application engineer", "application developer",
+    "cloud engineer", "security engineer",
 }
 
 # Role is excluded if it contains any of these — even if it also matches above
@@ -158,8 +159,12 @@ LEVER_SLUGS = [
 
 ASHBY_SLUGS = [
     "ramp", "notion", "skydio", "1password", "saronic",
-    "ellipsislabs", "homebase", "poshmark", "linear", "retool",
-    "vercel", "mercury", "watershed", "dbt-labs", "anyscale",
+    "ellipsislabs", "homebase", "poshmark", "linear",
+    "vercel", "mercury", "watershed", "anyscale",
+    # removed: "retool", "dbt-labs" — both return empty/non-JSON responses
+    # every cycle (likely stale slugs or no longer on Ashby), logged as
+    # WARNING every run with zero chance of ever succeeding. Add back with
+    # the correct slug if you confirm one.
 ]
 
 
@@ -271,7 +276,7 @@ ALERT_COOLDOWN_SECONDS = 86400  # re-alert on the same issue at most once/day
 
 ALL_SOURCES = [
     "zshah101", "github", "greenhouse", "lever", "ashby", "workday",
-    "google", "microsoft", "amazon", "meta", "apple", "yc",
+    "google", "amazon", "meta", "apple", "yc",
 ]
 
 
@@ -420,23 +425,24 @@ def is_us_location(loc: str) -> bool:
 def is_relevant(company: str, role: str, loc: str = "") -> bool:
     ro = role.lower()
 
-    # NOTE: no company allow-list gate here on purpose. TIER1 (below) only
-    # controls which email a match goes to — instant vs general — it must
-    # never determine whether a match counts at all. An earlier version of
-    # this function gated on ALL_TARGETS (= TIER1, since TIER2 was always
-    # empty), which meant only the ~20 TIER1 companies could ever produce a
-    # match — every other company's postings were silently dropped even
-    # when scraped successfully. Fixed.
+    # NOTE: no company allow-list gate here on purpose — see note above
+    # is_us_location for the earlier version of this bug.
+    #
+    # NOTE 2: exclude-only logic on purpose. This used to also require the
+    # role to positively match a SWE_INCLUDE_KEYWORDS list — but that meant
+    # every new unusual-but-legitimate title (e.g. Amazon's own "Software
+    # Development Engineer Intern") had to be manually whitelisted one at a
+    # time, and anything not yet added silently vanished. Flipped instead:
+    # any intern/co-op role passes by default, and only gets rejected if it
+    # actively matches something in EXCLUDE_KEYWORDS (data/ML, frontend/
+    # fullstack, quant, hardware, mobile). Any future weird-but-real SWE
+    # title now works automatically with zero maintenance.
 
     # Must be an intern/co-op role
     if not any(k in ro for k in INTERN_KEYWORDS):
         return False
 
-    # Must be a SWE-type role
-    if not any(k in ro for k in SWE_INCLUDE_KEYWORDS):
-        return False
-
-    # Kill frontend-only, fullstack, data, ML, hardware, mobile
+    # Reject anything explicitly outside SWE scope
     if any(k in ro for k in EXCLUDE_KEYWORDS):
         return False
 
@@ -851,35 +857,6 @@ def poll_google(ids, urls) -> list:
     return new
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SOURCE 8 — Microsoft Careers
-# Public search API, no auth required
-# ══════════════════════════════════════════════════════════════════════════════
-
-def poll_microsoft(ids, urls) -> list:
-    new = []
-    try:
-        resp = requests.get(
-            "https://gcsservices.careers.microsoft.com/search/api/v1/search"
-            "?q=software+intern&l=en_us&pg=1&pgSz=20&o=Relevance&flt=true",
-            headers=BROWSER_HEADERS, timeout=12,
-        )
-        if resp.status_code != 200:
-            return new
-        jobs = (resp.json()
-                .get("operationResult", {})
-                .get("result", {})
-                .get("jobs", []))
-        for j in jobs:
-            role = j.get("title", "")
-            loc  = j.get("primaryWorkLocation", "")
-            jid  = str(j.get("jobId", ""))
-            url  = f"https://jobs.careers.microsoft.com/global/en/job/{jid}"
-            if is_relevant("microsoft", role, loc) and is_new(ids, urls, "microsoft", jid, url):
-                new.append(job_dict("Microsoft", role, loc, url, "Microsoft Careers"))
-        log.info(f"microsoft:   {len(new):3d} new")
-    except Exception as e:
-        log.warning(f"microsoft: {e}")
     return new
 
 
@@ -1046,9 +1023,8 @@ def main():
     log.info("internship_monitor starting")
     ids, urls, health = load_state()
     log.info(f"loaded {len(ids)} seen IDs, {len(urls)} seen URLs")
-    log.info(f"targeting {len(ALL_TARGETS)} companies · polling every {POLL_INTERVAL}s")
-    log.info(f"tier-1 ({len(TIER1)}): immediate alert")
-    log.info(f"tier-2 ({len(TIER2)}): hourly digest")
+    log.info(f"no company allow-list — any company can match · polling every {POLL_INTERVAL}s")
+    log.info(f"tier-1 ({len(TIER1)}): immediate alert; everything else: general alert")
 
     digest_buffer: list = []
     last_digest = time.time()
@@ -1064,7 +1040,6 @@ def main():
             all_new += run_source("ashby",       poll_ashby,      ids, urls, health)
             all_new += run_source("workday",     poll_workday,    ids, urls, health)
             all_new += run_source("google",      poll_google,     ids, urls, health)
-            all_new += run_source("microsoft",   poll_microsoft,  ids, urls, health)
             all_new += run_source("amazon",      poll_amazon,     ids, urls, health)
             all_new += run_source("meta",        poll_meta,       ids, urls, health)
             all_new += run_source("apple",       poll_apple,      ids, urls, health)
@@ -1118,7 +1093,6 @@ def run_once():
     all_new += run_source("ashby",       poll_ashby,      ids, urls, health)
     all_new += run_source("workday",     poll_workday,    ids, urls, health)
     all_new += run_source("google",      poll_google,     ids, urls, health)
-    all_new += run_source("microsoft",   poll_microsoft,  ids, urls, health)
     all_new += run_source("amazon",      poll_amazon,     ids, urls, health)
     all_new += run_source("meta",        poll_meta,       ids, urls, health)
     all_new += run_source("apple",       poll_apple,      ids, urls, health)
