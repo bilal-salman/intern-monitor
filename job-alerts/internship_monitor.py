@@ -418,12 +418,15 @@ def is_us_location(loc: str) -> bool:
 
 
 def is_relevant(company: str, role: str, loc: str = "") -> bool:
-    co = company.lower()
     ro = role.lower()
 
-    # Must be a target company (or no filter set)
-    if ALL_TARGETS and not any(t in co for t in ALL_TARGETS):
-        return False
+    # NOTE: no company allow-list gate here on purpose. TIER1 (below) only
+    # controls which email a match goes to — instant vs general — it must
+    # never determine whether a match counts at all. An earlier version of
+    # this function gated on ALL_TARGETS (= TIER1, since TIER2 was always
+    # empty), which meant only the ~20 TIER1 companies could ever produce a
+    # match — every other company's postings were silently dropped even
+    # when scraped successfully. Fixed.
 
     # Must be an intern/co-op role
     if not any(k in ro for k in INTERN_KEYWORDS):
