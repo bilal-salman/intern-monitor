@@ -33,6 +33,7 @@ import time
 import smtplib
 import logging
 import hashlib
+import re
 import requests
 from datetime import datetime
 from email.mime.text import MIMEText
@@ -83,7 +84,8 @@ ALL_TARGETS = TIER1 | TIER2
 
 # ── Role filters ──────────────────────────────────────────────────────────────
 INTERN_KEYWORDS = {
-    "intern", "internship", "co-op", "coop", "co op",
+    "intern", "interns", "internship", "internships",
+    "co-op", "co-ops", "coop", "coops", "co op", "co ops",
 }
 
 # Role must contain at least one of these to pass
@@ -96,7 +98,7 @@ SWE_INCLUDE_KEYWORDS = {
     "systems engineer", "systems developer",
     "software engineering",
     "site reliability", "sre",
-    "devops engineer",
+    "devops", "devops engineer",
     "application engineer", "application developer",
     "cloud engineer", "security engineer",
 }
@@ -422,28 +424,39 @@ def is_us_location(loc: str) -> bool:
     return True
 
 
+def _kw_match(keywords, text: str) -> bool:
+    """Word-boundary match — prevents 'intern' matching inside 'internal'
+    or 'international', 'ai' matching inside random words, etc. Plain
+    substring matching (the previous approach) caused exactly that bug."""
+    return any(re.search(r'\b' + re.escape(k) + r'\b', text) for k in keywords)
+
+
 def is_relevant(company: str, role: str, loc: str = "") -> bool:
     ro = role.lower()
 
     # NOTE: no company allow-list gate here on purpose — see note above
     # is_us_location for the earlier version of this bug.
     #
-    # NOTE 2: exclude-only logic on purpose. This used to also require the
-    # role to positively match a SWE_INCLUDE_KEYWORDS list — but that meant
-    # every new unusual-but-legitimate title (e.g. Amazon's own "Software
-    # Development Engineer Intern") had to be manually whitelisted one at a
-    # time, and anything not yet added silently vanished. Flipped instead:
-    # any intern/co-op role passes by default, and only gets rejected if it
-    # actively matches something in EXCLUDE_KEYWORDS (data/ML, frontend/
-    # fullstack, quant, hardware, mobile). Any future weird-but-real SWE
-    # title now works automatically with zero maintenance.
+    # NOTE 2: hybrid include+exclude logic, not exclude-only. A pure
+    # exclude-only version was tried and it let through every non-SWE
+    # internship function a company happens to post (manufacturing,
+    # propulsion, supply chain, procurement, audit, HR) since there's no
+    # bounded way to list every non-SWE category. Requiring a positive
+    # SWE-title match is the correct constraint; SWE_INCLUDE_KEYWORDS is
+    # kept broad (updated after the Amazon-SDE-title gap) and is a much
+    # smaller, more bounded list to maintain than every possible non-SWE
+    # function across every company.
 
-    # Must be an intern/co-op role
-    if not any(k in ro for k in INTERN_KEYWORDS):
+    # Must be an intern/co-op role (word-boundary match — see _kw_match)
+    if not _kw_match(INTERN_KEYWORDS, ro):
         return False
 
-    # Reject anything explicitly outside SWE scope
-    if any(k in ro for k in EXCLUDE_KEYWORDS):
+    # Must positively look like a SWE role
+    if not _kw_match(SWE_INCLUDE_KEYWORDS, ro):
+        return False
+
+    # Secondary safety net — reject specific SWE-adjacent-but-not-SWE roles
+    if _kw_match(EXCLUDE_KEYWORDS, ro):
         return False
 
     # Must be a US location (or unknown/ambiguous — see is_us_location)
