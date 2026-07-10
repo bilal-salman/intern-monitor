@@ -130,8 +130,10 @@ EXCLUDE_KEYWORDS = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 GITHUB_REPOS = [
-    {"owner": "sndsh404", "repo": "summer-2027-internships",  "branch": "main"},
-    {"owner": "vanshb03",  "repo": "Summer2027-Internships",  "branch": "dev"},
+    {"owner": "sndsh404",    "repo": "summer-2027-internships",         "branch": "main"},
+    {"owner": "vanshb03",    "repo": "Summer2027-Internships",          "branch": "dev"},
+    {"owner": "speedyapply", "repo": "2027-SWE-College-Jobs",           "branch": "main"},
+    {"owner": "jobright-ai", "repo": "2026-Software-Engineer-Internship", "branch": "master"},
 ]
 
 ZSHAH101_API = (
@@ -625,13 +627,30 @@ def gh_headers() -> dict:
     return h
 
 
+def clean_md_text(text: str) -> str:
+    """Strips markdown formatting from a table cell so company/role text
+    displays cleanly in emails and the Sheet — otherwise sources that bold
+    or hyperlink their company/title text (speedyapply, jobright-ai) would
+    show raw '**[Rilla](https://...)**' syntax literally instead of 'Rilla'."""
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)   # [text](url) -> text
+    text = text.replace("**", "").replace("__", "")          # bold
+    return text.strip()
+
+
 def extract_md_url(cell: str) -> str:
-    if "](http" in cell:
-        try:
-            return cell.split("](")[1].split(")")[0].strip()
-        except Exception:
-            pass
-    return ""
+    """Extracts the real target URL from a markdown link cell. Handles both
+    plain links [text](url) and image-badge links [![alt](image)](url) —
+    for the latter, takes the LAST "](" split so we get the outer/real link,
+    not the badge image's own src. (speedyapply's README wraps every apply
+    link in an image badge this way; a naive first-split grabs the wrong
+    URL entirely.)"""
+    if "](http" not in cell:
+        return ""
+    try:
+        idx = cell.rfind("](http")
+        return cell[idx + 2:].split(")")[0].strip()
+    except Exception:
+        return ""
 
 
 def job_dict(company, role, loc, url, source) -> dict:
@@ -665,23 +684,19 @@ def poll_zshah101(ids, urls) -> list:
 # SOURCE 2 — GitHub repo commit monitor + README parser
 # ══════════════════════════════════════════════════════════════════════════════
 
-_last_sha: dict = {}
-
-
 def poll_github(ids, urls) -> list:
     new = []
     for r in GITHUB_REPOS:
         key = f"{r['owner']}/{r['repo']}"
         try:
-            resp = requests.get(
-                f"https://api.github.com/repos/{r['owner']}/{r['repo']}/commits/{r['branch']}",
-                headers=gh_headers(), timeout=10,
-            )
-            sha = resp.json().get("sha", "")
-            if not sha or sha == _last_sha.get(key):
-                continue
-            _last_sha[key] = sha
-            log.info(f"github:      new commit {key} ({sha[:8]})")
+            # NOTE: previously tried to skip re-parsing when the latest
+            # commit sha matched a "_last_sha" cache — but that cache was a
+            # plain in-memory dict, and GitHub Actions starts a brand-new
+            # process every cycle, so it was always empty and never
+            # actually skipped anything. Real dedup already happens via the
+            # persisted seen_jobs.json in _parse_readme/is_new, so this
+            # just always parses — simpler, and no functional change to
+            # what gets caught (only removes a wasted, meaningless check).
             new.extend(_parse_readme(r, ids, urls, key))
         except Exception as e:
             log.warning(f"github ({key}): {e}")
@@ -692,6 +707,7 @@ def poll_github(ids, urls) -> list:
 
 def _parse_readme(r, ids, urls, key) -> list:
     new = []
+    total_rows = relevant_count = dup_count = 0
     try:
         raw = requests.get(
             f"https://raw.githubusercontent.com/{r['owner']}/{r['repo']}"
@@ -704,16 +720,36 @@ def _parse_readme(r, ids, urls, key) -> list:
             cells = [c.strip() for c in line.split("|") if c.strip()]
             if len(cells) < 2:
                 continue
-            company = cells[0].lstrip("↳ ").strip()
-            role    = cells[1]
+            company = clean_md_text(cells[0].lstrip("↳ ").strip())
+            role    = clean_md_text(cells[1])
             if company.lower() in {"company", "org", "role", "position"}:
                 continue
-            apply_url = next((extract_md_url(c) for c in cells if extract_md_url(c)), "")
+            total_rows += 1
+            # Search in REVERSE — the real apply link is conventionally the
+            # last column. Searching forward (the old approach) could grab
+            # a company-name cell's own hyperlink (e.g. speedyapply links
+            # "[**Rivian**](careers.rivian.com)" in the company column)
+            # instead of the actual job-specific apply link, which would
+            # silently collapse every one of that company's distinct
+            # postings into a single dedup identity.
+            apply_url = next((extract_md_url(c) for c in reversed(cells) if extract_md_url(c)), "")
             if not apply_url:
                 continue
             loc = cells[2] if len(cells) > 2 else ""
-            if is_relevant(company, role, loc) and is_new(ids, urls, key, apply_url, apply_url):
-                new.append(job_dict(company, role, loc, apply_url, f"github/{r['owner']}"))
+            if is_relevant(company, role, loc):
+                relevant_count += 1
+                if is_new(ids, urls, key, apply_url, apply_url):
+                    new.append(job_dict(company, role, loc, apply_url, f"github/{r['owner']}"))
+                else:
+                    dup_count += 1
+        # Diagnostic — shows exactly where rows are getting filtered out per
+        # source, so a source that looks "silent" can be distinguished from
+        # one that's genuinely finding nothing new right now.
+        log.info(
+            f"github/{r['owner']}: {total_rows} rows parsed, "
+            f"{relevant_count} passed filter, {dup_count} already-seen, "
+            f"{len(new)} new"
+        )
     except Exception as e:
         log.warning(f"readme parse ({key}): {e}")
     return new
