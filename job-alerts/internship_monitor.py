@@ -628,22 +628,28 @@ def gh_headers() -> dict:
 
 
 def clean_md_text(text: str) -> str:
-    """Strips markdown formatting from a table cell so company/role text
-    displays cleanly in emails and the Sheet — otherwise sources that bold
-    or hyperlink their company/title text (speedyapply, jobright-ai) would
-    show raw '**[Rilla](https://...)**' syntax literally instead of 'Rilla'."""
-    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)   # [text](url) -> text
-    text = text.replace("**", "").replace("__", "")          # bold
+    """Strips markdown AND raw HTML formatting from a table cell so company/
+    role text displays cleanly — otherwise sources that wrap their company/
+    title text in HTML tags (speedyapply uses raw <a href><strong> tags,
+    not markdown) or markdown bold/links (jobright-ai) would show garbage
+    like '<a href="...">​<strong>NVIDIA</strong></a>' instead of 'NVIDIA'."""
+    text = re.sub(r'<[^>]+>', '', text)                       # strip HTML tags
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)       # [text](url) -> text
+    text = text.replace("**", "").replace("__", "")            # markdown bold
     return text.strip()
 
 
 def extract_md_url(cell: str) -> str:
-    """Extracts the real target URL from a markdown link cell. Handles both
-    plain links [text](url) and image-badge links [![alt](image)](url) —
-    for the latter, takes the LAST "](" split so we get the outer/real link,
-    not the badge image's own src. (speedyapply's README wraps every apply
-    link in an image badge this way; a naive first-split grabs the wrong
-    URL entirely.)"""
+    """Extracts the real target URL from a table cell. Different sources
+    use genuinely different link syntax for their apply buttons:
+      - vanshb03 and speedyapply use raw HTML: <a href="URL">...</a>
+      - sndsh404 and jobright-ai use markdown: [text](url) or [![alt](img)](url)
+    Checks HTML first (a plain href= match), then falls back to markdown
+    (searching from the end of the cell, so an image-badge link's real
+    outer URL is found rather than the badge image's own src)."""
+    m = re.search(r'href=["\'](https?://[^"\']+)["\']', cell)
+    if m:
+        return m.group(1)
     if "](http" not in cell:
         return ""
     try:
