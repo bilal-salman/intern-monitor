@@ -36,6 +36,7 @@ import hashlib
 import re
 import requests
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from html.parser import HTMLParser
@@ -491,6 +492,16 @@ BROWSER_HEADERS = {
 }
 
 
+def _local_now_str() -> str:
+    """GitHub Actions runners default to UTC, so a plain datetime.now() in
+    an email would show a confusing time — e.g. 7:28 PM Pacific shows up as
+    2:27 AM the next day in UTC. Converts to US Pacific for display, since
+    that's Bilal's timezone; adjust ZoneInfo string if that ever changes."""
+    now_utc = datetime.now(ZoneInfo("UTC"))
+    now_local = now_utc.astimezone(ZoneInfo("America/Los_Angeles"))
+    return now_local.strftime('%A %b %d, %Y · %H:%M')
+
+
 def _build_email_html(jobs: list, label: str) -> str:
     rows = "".join(
         f"""<tr>
@@ -516,7 +527,7 @@ def _build_email_html(jobs: list, label: str) -> str:
       <div style="background:#0f172a;padding:20px 24px">
         <h2 style="color:#fff;margin:0;font-size:20px">{label}</h2>
         <p style="color:#94a3b8;margin:6px 0 0;font-size:13px">
-          {datetime.now().strftime('%A %b %d, %Y · %H:%M')}
+          {_local_now_str()}
           · {len(jobs)} role{'s' if len(jobs)>1 else ''}
         </p>
       </div>
