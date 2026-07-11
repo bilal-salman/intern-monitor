@@ -237,18 +237,42 @@ def save_seen(ids: set, urls: set):
 
 
 def load_state() -> tuple[set, set, dict]:
-    """Single read of SEEN_FILE returning ids, urls, and health tracking."""
+    """Single read of SEEN_FILE returning ids, urls, and health tracking.
+    Falls back to empty state (with a loud warning) instead of crashing the
+    whole workflow if the file is missing, empty, or corrupted — a hard
+    crash here means the automation stops entirely until someone notices
+    and fixes it by hand, which is worse than one cycle re-flagging
+    already-seen jobs."""
     if Path(SEEN_FILE).exists():
-        with open(SEEN_FILE) as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                return set(data), set(), {}
-            return (set(data.get("ids", [])), set(data.get("urls", [])),
-                    data.get("health", {}))
+        try:
+            with open(SEEN_FILE) as f:
+                data = json.load(f)
+        except json.JSONDecodeError as e:
+            log.error(
+                f"{SEEN_FILE} is corrupted/empty ({e}) — starting from "
+                f"empty state this cycle. Check {SEEN_FILE}.bak in the repo "
+                f"to recover prior dedup history if this wasn't expected."
+            )
+            return set(), set(), {}
+        if isinstance(data, list):
+            return set(data), set(), {}
+        return (set(data.get("ids", [])), set(data.get("urls", [])),
+                data.get("health", {}))
     return set(), set(), {}
 
 
 def save_state(ids: set, urls: set, health: dict):
+    # Keep a rolling backup of the last known-good state before overwriting,
+    # so a future corruption (bad write, interrupted process, etc.) can be
+    # recovered from directly in the repo without digging through git history.
+    if Path(SEEN_FILE).exists():
+        try:
+            with open(SEEN_FILE) as f:
+                json.load(f)  # only back up if the existing file is valid
+            import shutil
+            shutil.copy(SEEN_FILE, f"{SEEN_FILE}.bak")
+        except (json.JSONDecodeError, OSError):
+            pass  # existing file already bad — don't propagate a bad backup
     with open(SEEN_FILE, "w") as f:
         json.dump({"ids": sorted(ids), "urls": sorted(urls), "health": health}, f)
 
