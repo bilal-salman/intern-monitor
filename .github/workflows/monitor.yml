@@ -7,7 +7,11 @@ on:
 
 concurrency:
   group: internship-monitor
-  cancel-in-progress: false   # queue overlapping runs instead of racing on git push
+  cancel-in-progress: true   # a stuck/hung run must never block every future
+                              # trigger indefinitely — the git pull --rebase
+                              # --autostash retry in the push step already
+                              # handles the overlap case this used to guard
+                              # against
 
 jobs:
   monitor:
