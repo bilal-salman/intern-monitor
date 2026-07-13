@@ -1,21 +1,32 @@
 name: Internship Monitor
 
 on:
-  schedule:
-    - cron: '2,12,22,32,42,52 * * * *'   # every 10 min, offset from :00 to dodge peak-load delays
-  workflow_dispatch:           # lets you trigger it manually from GitHub too
+  # Disabled for now — testing manually via workflow_dispatch first.
+  # Uncomment once a manual test run succeeds cleanly, THEN re-enable
+  # cron-job.org (or leave this off entirely and let cron-job.org be the
+  # only trigger, since it's already hitting workflow_dispatch every 5 min —
+  # running both this schedule AND cron-job.org double-fires the job).
+  # schedule:
+  #   - cron: '2,12,22,32,42,52 * * * *'   # every 10 min, offset from :00 to dodge peak-load delays
+  workflow_dispatch:           # lets you trigger it manually from GitHub, and is what cron-job.org calls
 
 concurrency:
   group: internship-monitor
-  cancel-in-progress: true   # a stuck/hung run must never block every future
-                              # trigger indefinitely — the git pull --rebase
-                              # --autostash retry in the push step already
-                              # handles the overlap case this used to guard
-                              # against
+  cancel-in-progress: false   # NEVER cancel an in-progress run — cancellation
+                               # can interrupt mid-file-write and leave
+                               # seen_jobs.json truncated to empty, which is
+                               # what actually caused every "corrupted" incident
+                               # tonight. Queue instead; timeout-minutes below
+                               # is what protects against a genuinely stuck run.
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 10   # auto-fails a genuinely hung run after 10 min,
+                           # instead of blocking every future trigger forever
+                           # (which is what happened before) — WITHOUT relying
+                           # on cancellation, which is what caused the
+                           # file-truncation corruption
     permissions:
       contents: write
 

@@ -51,7 +51,6 @@ import os
 GMAIL_USER   = os.environ.get("GMAIL_USER",   "your_gmail@gmail.com")
 GMAIL_APP_PW = os.environ.get("GMAIL_APP_PW", "xxxx xxxx xxxx xxxx")
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "your_gmail@gmail.com")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
 # Optional — logs every new match to your Google Sheet tracker via an Apps
 # Script webhook. If either is unset, this feature silently no-ops; nothing
@@ -220,22 +219,6 @@ log = logging.getLogger(__name__)
 # Secondary key: raw apply URL       — catches same job across multiple sources
 # ══════════════════════════════════════════════════════════════════════════════
 
-def load_seen() -> tuple[set, set]:
-    if Path(SEEN_FILE).exists():
-        with open(SEEN_FILE) as f:
-            data = json.load(f)
-            # support both old (list) and new (dict) format
-            if isinstance(data, list):
-                return set(data), set()
-            return set(data.get("ids", [])), set(data.get("urls", []))
-    return set(), set()
-
-
-def save_seen(ids: set, urls: set):
-    with open(SEEN_FILE, "w") as f:
-        json.dump({"ids": sorted(ids), "urls": sorted(urls)}, f)
-
-
 def load_state() -> tuple[set, set, dict]:
     """Single read of SEEN_FILE returning ids, urls, and health tracking.
     Falls back to empty state (with a loud warning) instead of crashing the
@@ -273,8 +256,19 @@ def save_state(ids: set, urls: set, health: dict):
             shutil.copy(SEEN_FILE, f"{SEEN_FILE}.bak")
         except (json.JSONDecodeError, OSError):
             pass  # existing file already bad — don't propagate a bad backup
-    with open(SEEN_FILE, "w") as f:
+
+    # ATOMIC WRITE — write to a temp file, then os.replace() over the real
+    # one only once the write has fully succeeded. Opening SEEN_FILE
+    # directly in "w" mode truncates it to 0 bytes immediately, before any
+    # new content is written — if the process gets killed at that exact
+    # moment (cancellation, crash, timeout), the file is left empty. This
+    # was the actual root cause of every "corrupted/empty" incident tonight.
+    # Writing to a separate temp path means the real file is never touched
+    # until a complete, valid write is ready to swap in.
+    tmp_path = f"{SEEN_FILE}.tmp"
+    with open(tmp_path, "w") as f:
         json.dump({"ids": sorted(ids), "urls": sorted(urls), "health": health}, f)
+    os.replace(tmp_path, SEEN_FILE)
 
 
 def make_id(source: str, uid: str) -> str:
@@ -495,9 +489,9 @@ def is_relevant(company: str, role: str, loc: str = "") -> bool:
 
 def tier(company: str) -> int:
     co = company.lower()
-    if any(t in co for t in TIER1):
+    if _kw_match(TIER1, co):
         return 1
-    if any(t in co for t in TIER2):
+    if _kw_match(TIER2, co):
         return 2
     return 2  # default to digest if it made it through the filter
 
@@ -628,39 +622,51 @@ def send_health_alert(alerts: list):
 def log_to_sheet(jobs: list):
     if not jobs or not SHEETS_WEBHOOK_URL:
         return
-    logged = 0
-    for j in jobs:
+    # Single batched request instead of one-per-job — sending 183 sequential
+    # requests at 15s timeout each was the actual root cause of runs
+    # stretching past the 5-min trigger window during tonight's flood,
+    # which is what created the overlap pressure behind the whole cascade.
+    try:
+        resp = requests.post(
+            SHEETS_WEBHOOK_URL,
+            json={
+                "secret": SHEETS_WEBHOOK_SECRET,
+                "jobs": [
+                    {
+                        "company": j["company"],
+                        "role":    j["role"],
+                        "status":  "APPLY NOW",
+                        "link":    j["url"],
+                    }
+                    for j in jobs
+                ],
+            },
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            log.warning(f"sheet log failed: HTTP {resp.status_code}")
+            return
+        # Apps Script's ContentService always returns HTTP 200, even when
+        # the handler itself failed (bad secret, tab not found, spreadsheet
+        # not bound) — the real result is the "ok" field in the JSON body,
+        # not the status code. Checking status alone would silently report
+        # success on every one of those failure modes.
         try:
-            resp = requests.post(
-                SHEETS_WEBHOOK_URL,
-                json={
-                    "secret":  SHEETS_WEBHOOK_SECRET,
-                    "company": j["company"],
-                    "role":    j["role"],
-                    "status":  "APPLY NOW",
-                    "link":    j["url"],
-                },
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                logged += 1
-            else:
-                log.warning(f"sheet log failed ({j['company']}): HTTP {resp.status_code}")
-        except Exception as e:
-            log.warning(f"sheet log error ({j['company']}): {e}")
-    log.info(f"sheet:       logged {logged}/{len(jobs)} row(s)")
+            body = resp.json()
+        except ValueError:
+            log.warning(f"sheet log failed: non-JSON response body: {resp.text[:200]!r}")
+            return
+        if body.get("ok"):
+            log.info(f"sheet:       logged {body.get('appended', len(jobs))}/{len(jobs)} row(s)")
+        else:
+            log.warning(f"sheet log failed: {body.get('error', 'unknown error')}")
+    except Exception as e:
+        log.warning(f"sheet log error: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
-
-def gh_headers() -> dict:
-    h = {"Accept": "application/vnd.github+json"}
-    if GITHUB_TOKEN:
-        h["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-    return h
-
 
 def clean_md_text(text: str) -> str:
     """Strips markdown AND raw HTML formatting from a table cell so company/
@@ -713,7 +719,11 @@ def poll_zshah101(ids, urls) -> list:
             role    = j.get("role", j.get("title", ""))
             url     = j.get("url", j.get("apply", ""))
             loc     = j.get("location", "")
-            if is_relevant(company, role, loc) and is_new(ids, urls, "zshah101", url, url):
+            # jid falls back to a composite key when url is missing, so
+            # url-less jobs don't all collapse onto the same dedup hash
+            # (which would silently drop every url-less job after the first)
+            jid     = j.get("id") or url or f"{company}|{role}|{loc}"
+            if is_relevant(company, role, loc) and is_new(ids, urls, "zshah101", jid, url):
                 new.append(job_dict(company, role, loc, url, "zshah101"))
         log.info(f"zshah101:    {len(new):3d} new")
     except Exception as e:
@@ -944,9 +954,6 @@ def poll_google(ids, urls) -> list:
         log.info(f"google:      {len(new):3d} new")
     except Exception as e:
         log.warning(f"google careers: {e}")
-    return new
-
-
     return new
 
 
