@@ -133,7 +133,6 @@ GITHUB_REPOS = [
     {"owner": "sndsh404",    "repo": "summer-2027-internships",         "branch": "main"},
     {"owner": "vanshb03",    "repo": "Summer2027-Internships",          "branch": "dev"},
     {"owner": "speedyapply", "repo": "2027-SWE-College-Jobs",           "branch": "main"},
-    {"owner": "jobright-ai", "repo": "2026-Software-Engineer-Internship", "branch": "master"},
 ]
 
 ZSHAH101_API = (
@@ -672,7 +671,7 @@ def clean_md_text(text: str) -> str:
     """Strips markdown AND raw HTML formatting from a table cell so company/
     role text displays cleanly — otherwise sources that wrap their company/
     title text in HTML tags (speedyapply uses raw <a href><strong> tags,
-    not markdown) or markdown bold/links (jobright-ai) would show garbage
+    not markdown) or markdown bold/links (sndsh404) would show garbage
     like '<a href="...">​<strong>NVIDIA</strong></a>' instead of 'NVIDIA'."""
     text = re.sub(r'<[^>]+>', '', text)                       # strip HTML tags
     text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)       # [text](url) -> text
@@ -684,7 +683,7 @@ def extract_md_url(cell: str) -> str:
     """Extracts the real target URL from a table cell. Different sources
     use genuinely different link syntax for their apply buttons:
       - vanshb03 and speedyapply use raw HTML: <a href="URL">...</a>
-      - sndsh404 and jobright-ai use markdown: [text](url) or [![alt](img)](url)
+      - sndsh404 uses markdown: [text](url) or [![alt](img)](url)
     Checks HTML first (a plain href= match), then falls back to markdown
     (searching from the end of the cell, so an image-badge link's real
     outer URL is found rather than the badge image's own src)."""
