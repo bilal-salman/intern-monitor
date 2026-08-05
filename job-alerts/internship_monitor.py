@@ -131,8 +131,6 @@ EXCLUDE_KEYWORDS = {
 
 GITHUB_REPOS = [
     {"owner": "sndsh404",    "repo": "summer-2027-internships",         "branch": "main"},
-    {"owner": "vanshb03",    "repo": "Summer2027-Internships",          "branch": "dev"},
-    {"owner": "speedyapply", "repo": "2027-SWE-College-Jobs",           "branch": "main"},
 ]
 
 ZSHAH101_API = (
@@ -281,19 +279,19 @@ def make_id(source: str, uid: str) -> str:
 #
 # Per source we track:
 #   consec_errors  — polls in a row that raised an exception (network/API break)
-#   last_nonzero   — unix ts of the last time this source returned >0 jobs
 #   last_alerted   — unix ts we last sent a health warning for this source,
 #                    so we alert once per issue instead of every 30 min
 #
-# Two alert conditions:
+# One alert condition:
 #   ERRORING — 3+ consecutive exceptions → something is actively broken
-#   SILENT   — 7+ days since last nonzero result → probably broken, just not
-#              throwing (e.g. README table format changed, HTML scrape target
-#              moved) — the exact failure mode flagged for GitHub/Meta
+#
+# (Previously also alerted on 7+ days with zero results per source, but that
+# fires on totally normal quiet stretches — e.g. a company's board just not
+# posting SWE intern roles yet — not just genuine breakage, so it's removed.
+# As long as a source runs without throwing, that's good enough.)
 # ══════════════════════════════════════════════════════════════════════════════
 
 ERROR_STREAK_THRESHOLD = 3
-SILENT_DAYS_THRESHOLD  = 7
 ALERT_COOLDOWN_SECONDS = 86400  # re-alert on the same issue at most once/day
 
 ALL_SOURCES = [
@@ -305,14 +303,10 @@ ALL_SOURCES = [
 def run_source(name: str, fn, ids, urls, health: dict) -> list:
     """Wraps a poll_* call, updates health tracking, never lets one source's
     failure take down the whole cycle."""
-    rec = health.setdefault(name, {
-        "consec_errors": 0, "last_nonzero": time.time(), "last_alerted": 0,
-    })
+    rec = health.setdefault(name, {"consec_errors": 0, "last_alerted": 0})
     try:
         results = fn(ids, urls)
         rec["consec_errors"] = 0
-        if results:
-            rec["last_nonzero"] = time.time()
         return results
     except Exception as e:
         rec["consec_errors"] += 1
@@ -321,8 +315,8 @@ def run_source(name: str, fn, ids, urls, health: dict) -> list:
 
 
 def check_health_alerts(health: dict) -> list:
-    """Returns a list of human-readable alert strings for sources that look
-    broken, respecting the once-per-day cooldown per source."""
+    """Returns a list of human-readable alert strings for sources that are
+    actively erroring, respecting the once-per-day cooldown per source."""
     now = time.time()
     alerts = []
     for name in ALL_SOURCES:
@@ -332,23 +326,11 @@ def check_health_alerts(health: dict) -> list:
         if now - rec.get("last_alerted", 0) < ALERT_COOLDOWN_SECONDS:
             continue
 
-        fired = False
         if rec.get("consec_errors", 0) >= ERROR_STREAK_THRESHOLD:
             alerts.append(
                 f"⚠️ {name}: {rec['consec_errors']} consecutive failed polls — "
                 f"likely broken (API/endpoint change)."
             )
-            fired = True
-        else:
-            days_silent = (now - rec.get("last_nonzero", now)) / 86400
-            if days_silent >= SILENT_DAYS_THRESHOLD:
-                alerts.append(
-                    f"⚠️ {name}: 0 results for {days_silent:.1f} days — "
-                    f"probably broken silently (parser/format change), not just quiet."
-                )
-                fired = True
-
-        if fired:
             rec["last_alerted"] = now
 
     return alerts
@@ -669,10 +651,10 @@ def log_to_sheet(jobs: list):
 
 def clean_md_text(text: str) -> str:
     """Strips markdown AND raw HTML formatting from a table cell so company/
-    role text displays cleanly — otherwise sources that wrap their company/
-    title text in HTML tags (speedyapply uses raw <a href><strong> tags,
-    not markdown) or markdown bold/links (sndsh404) would show garbage
-    like '<a href="...">​<strong>NVIDIA</strong></a>' instead of 'NVIDIA'."""
+    role text displays cleanly. sndsh404 (the only GitHub README source left)
+    uses markdown bold/links, but this also defensively strips stray HTML
+    tags in case a cell embeds any — otherwise garbage like
+    '<a href="...">​<strong>NVIDIA</strong></a>' could show instead of 'NVIDIA'."""
     text = re.sub(r'<[^>]+>', '', text)                       # strip HTML tags
     text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)       # [text](url) -> text
     text = text.replace("**", "").replace("__", "")            # markdown bold
@@ -680,10 +662,10 @@ def clean_md_text(text: str) -> str:
 
 
 def extract_md_url(cell: str) -> str:
-    """Extracts the real target URL from a table cell. Different sources
-    use genuinely different link syntax for their apply buttons:
-      - vanshb03 and speedyapply use raw HTML: <a href="URL">...</a>
-      - sndsh404 uses markdown: [text](url) or [![alt](img)](url)
+    """Extracts the real target URL from a table cell. sndsh404 (the only
+    GitHub README source left) uses markdown link syntax: [text](url) or
+    [![alt](img)](url). The HTML href= check below is kept defensively in
+    case a cell ever embeds raw HTML, but markdown is the expected shape.
     Checks HTML first (a plain href= match), then falls back to markdown
     (searching from the end of the cell, so an image-badge link's real
     outer URL is found rather than the badge image's own src)."""
@@ -940,6 +922,7 @@ def poll_google(ids, urls) -> list:
             headers=BROWSER_HEADERS, timeout=12,
         )
         if resp.status_code != 200:
+            log.warning(f"google careers: HTTP {resp.status_code} (likely blocked/rate-limited) — 0 new")
             return new
         for j in resp.json().get("jobs", []):
             role = j.get("title", {})
@@ -1006,6 +989,10 @@ def poll_meta(ids, urls) -> list:
         # Meta embeds job JSON in a script tag
         match = re.search(r'"job_listings":\s*(\[.+?\])', resp.text, re.DOTALL)
         if not match:
+            log.warning(
+                f"meta: HTTP {resp.status_code}, no job_listings match "
+                f"(page markup changed or request blocked) — 0 new"
+            )
             return new
         jobs = json.loads(match.group(1))
         for j in jobs:
@@ -1043,6 +1030,7 @@ def poll_apple(ids, urls) -> list:
             timeout=12,
         )
         if resp.status_code != 200:
+            log.warning(f"apple jobs: HTTP {resp.status_code} (likely blocked/rate-limited) — 0 new")
             return new
         for j in resp.json().get("searchResults", []):
             role = j.get("postingTitle", "")
@@ -1072,6 +1060,7 @@ def poll_yc(ids, urls) -> list:
             headers=BROWSER_HEADERS, timeout=12,
         )
         if resp.status_code != 200:
+            log.warning(f"yc waas: HTTP {resp.status_code} (likely blocked/rate-limited) — 0 new")
             return new
         data = resp.json()
         companies = data if isinstance(data, list) else data.get("companies", [])
